@@ -14,6 +14,16 @@ from pptx import Presentation
 from docx import Document as DocxDocument
 from custom_libs.custom_logging import get_logger
 
+# OCR imports - with graceful fallback if not installed
+try:
+    from pdf2image import convert_from_path
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
+    logger = get_logger()
+    logger.warning("OCR libraries not available. Install 'pytesseract', 'pdf2image', and 'Pillow' for scanned PDF support.")
+
 logger = get_logger()
 
 def filesystemFileSampleList(input_file_list, file_sample_size,file_system_path,):
@@ -49,83 +59,60 @@ def filesystemFileSampleList(input_file_list, file_sample_size,file_system_path,
     files_to_process = []
     content = ''
 
+    def build_file_info(path_str):
+        fileFullPath = Path(path_str)
+        fileName = fileFullPath.name
+        if file_system_path:
+            root_name = Path(file_system_path).name or "FileSystem"
+        else:
+            root_name = "FileSystem"
+        try:
+            rel_folder = fileFullPath.parent.relative_to(file_system_path).as_posix()
+        except ValueError:
+            rel_folder = fileFullPath.parent.as_posix()
+
+        print(f"Processing {fileName}")
+        local_content = ''
+        if fileName.endswith(".docx"):
+            try:
+                document = DocxDocument(fileFullPath)
+                local_content = "\n".join([paragraph.text for paragraph in document.paragraphs])
+            except Exception as err:
+                logger.error(f"Error processing document: {err}")
+        elif fileName.endswith(".pdf"):
+            try:
+                local_content = extractPDFContent(fileFullPath)
+            except Exception as err:
+                logger.error(f"Error processing document: {err}")
+        elif fileName.endswith(".pptx"):
+            try:
+                local_content = extractPPTXContent(fileFullPath)
+            except Exception as err:
+                logger.error(f"Error processing document: {err}")
+
+        file_info = {
+            'id': str(uuid.uuid4()),
+            'name': fileName,
+            'created_datetime': datetime.fromtimestamp(fileFullPath.stat().st_ctime),
+            'created_by': str(fileFullPath.stat().st_uid),
+            'size': fileFullPath.stat().st_size,
+            'last_modified_datetime': datetime.fromtimestamp(fileFullPath.stat().st_mtime),
+            'last_modified_by': str(fileFullPath.stat().st_uid),
+            'source': path_str,
+            'parentObject': f"{root_name}/{rel_folder}" if rel_folder else root_name,
+            'typedef': 'FileSystemFile',
+            'fs_root': root_name,
+            'fs_folder': rel_folder,
+            'content': local_content,
+        }
+        return file_info
+
     if num_files_found > file_sample_size:
-        # Randomly sample files if more files are found than the desired sample size
         for item in random.sample(range(num_files_found), file_sample_size):
-            fileFullPath = Path(input_file_list[item])
-            fileName = fileFullPath.name
-            print(f"Processing {fileName}")
-            if fileName.endswith(".docx"):
-                try:
-                    document = DocxDocument(fileFullPath)
-                    content = "\n".join([paragraph.text for paragraph in document.paragraphs])
-                except Exception as err:
-                    logger.error(f"Error processing document: {err}")
-            elif fileName.endswith(".pdf"):
-                try:
-                    content = extractPDFContent(fileFullPath)
-                except Exception as err:
-                    logger.error(f"Error processing document: {err}")
-            elif fileName.endswith(".pptx"):
-                try:
-                    content = extractPPTXContent(fileFullPath)
-                except Exception as err:
-                    logger.error(f"Error processing document: {err}")
-            # Create a dictionary with file information
-            file_info = {
-                'id': str(uuid.uuid4()),
-                'name': fileName,
-                'created_datetime': datetime.fromtimestamp(fileFullPath.stat().st_ctime),
-                'created_by': str(fileFullPath.stat().st_uid),
-                'size': fileFullPath.stat().st_size,
-                'last_modified_datetime': datetime.fromtimestamp(fileFullPath.stat().st_mtime),
-                'last_modified_by': str(fileFullPath.stat().st_uid),
-                'source': input_file_list[item],
-                # Israel
-                "parentObject": f"{file_system_path}",
-                ########
-                'typedef': 'FileSystem',
-                'content': content,
-            }
-            files_to_process.append(file_info)
+            files_to_process.append(build_file_info(input_file_list[item]))
     else:
-        # Include all files if the number of files found is less than or equal to the sample size
         for item in input_file_list:
-            fileFullPath = Path(item)
-            fileName = fileFullPath.name
-            print(f"Processing {fileName}")
-            if fileName.endswith(".docx"):
-                try:
-                    document = DocxDocument(fileFullPath)
-                    content = "\n".join([paragraph.text for paragraph in document.paragraphs])
-                except Exception as err:
-                    logger.error(f"Error processing document: {err}")
-            elif fileName.endswith(".pdf"):
-                try:
-                    content = extractPDFContent(fileFullPath)
-                except Exception as err:
-                    logger.error(f"Error processing document: {err}")
-            elif fileName.endswith(".pptx"):
-                try:
-                    content = extractPPTXContent(fileFullPath)
-                except Exception as err:
-                    logger.error(f"Error processing document: {err}")
-            file_info = {
-                'id': str(uuid.uuid4()),
-                'name': fileName,
-                'created_datetime': datetime.fromtimestamp(fileFullPath.stat().st_ctime),
-                'created_by': str(fileFullPath.stat().st_uid),
-                'size': fileFullPath.stat().st_size,
-                'last_modified_datetime': datetime.fromtimestamp(fileFullPath.stat().st_mtime),
-                'last_modified_by': str(fileFullPath.stat().st_uid),
-                'source': item,
-                # Israel
-                "parentObject": f"{file_system_path}",
-                ########
-                'typedef': 'FileSystem',
-                'content': content,
-            }
-            files_to_process.append(file_info)
+            files_to_process.append(build_file_info(item))
 
     return files_to_process
 
@@ -168,27 +155,97 @@ def listFilesystemFiles(mypath, extensions):
     Lists files in a directory matching specified extensions.
 
     Args:
-        mypath (str): Path to the directory.
-        extensions (list): List of file extensions (e.g., ['.txt', '.csv', '.jpg']).
+        mypath (str): Path to the directory. If empty, defaults to "SampleFiles".
+        extensions (list): List of file extensions (e.g., ['txt', 'csv', 'jpg'] or ['.txt', '.csv', '.jpg']).
 
     Returns:
         list: List of filenames matching the specified extensions.
     """
-    return [os.path.join(dirpath, f) for (dirpath, _, filenames) in os.walk(mypath) for f in filenames if any(f.endswith(ext) for ext in extensions)]
+    # Default to SampleFiles if path is empty
+    if not mypath:
+        mypath = "SampleFiles"
+    
+    # Ensure extensions have dots
+    normalized_extensions = [ext if ext.startswith('.') else f'.{ext}' for ext in extensions]
+    
+    logger.info(f"Scanning filesystem: '{mypath}' for extensions: {normalized_extensions}")
+    
+    files_found = [
+        os.path.join(dirpath, f) 
+        for (dirpath, _, filenames) in os.walk(mypath) 
+        for f in filenames 
+        if any(f.endswith(ext) for ext in normalized_extensions)
+    ]
+    
+    logger.info(f"Found {len(files_found)} files in filesystem")
+    return files_found
 
 def extractPDFContent(fileFullPath):
-    # Function to convert PDF files to Text
+    # Function to convert PDF files to Text with enhanced extraction
     try:
-        pdffileobj = open(fileFullPath,'rb')
-        pdfreader = PyPDF2.PdfReader(pdffileobj)
-        num_pages = len(pdfreader.pages)
-        content = ''
-        for page in range(num_pages):
-            pageobj = pdfreader.pages[page]
-            content += ''.join(pageobj.extract_text())
-        return content
+        with open(fileFullPath, 'rb') as pdffileobj:
+            pdfreader = PyPDF2.PdfReader(pdffileobj)
+            num_pages = len(pdfreader.pages)
+            content = ''
+            for page in range(num_pages):
+                pageobj = pdfreader.pages[page]
+                page_text = pageobj.extract_text()
+                if page_text:
+                    content += page_text + '\n'
+            
+            # Clean up the extracted text
+            content = content.strip()
+        
+        # If minimal content extracted, try OCR
+        if len(content) < 50:
+            logger.warning(f"Minimal text extracted from PDF ({len(content)} chars). Attempting OCR...")
+            if OCR_AVAILABLE:
+                ocr_content = extractPDFContentWithOCR(fileFullPath)
+                if ocr_content and len(ocr_content) > len(content):
+                    logger.info(f"OCR extracted {len(ocr_content)} chars (vs {len(content)} from standard extraction)")
+                    return ocr_content
+            else:
+                logger.warning("OCR not available. Install pytesseract, pdf2image, and Pillow for scanned PDF support.")
+            
+        return content if content else None
     except Exception as err:
         logger.error(f"Error processing document: {err}")
+        return None
+
+def extractPDFContentWithOCR(fileFullPath, max_pages=10):
+    """
+    Extract text from PDF using OCR (Optical Character Recognition).
+    Useful for scanned/image-based PDFs where standard text extraction fails.
+    
+    Args:
+        fileFullPath: Path to the PDF file
+        max_pages: Maximum number of pages to process (to avoid long processing times)
+    
+    Returns:
+        Extracted text content or None if OCR fails
+    """
+    if not OCR_AVAILABLE:
+        return None
+        
+    try:
+        # Convert PDF pages to images
+        logger.info(f"Converting PDF to images for OCR processing...")
+        images = convert_from_path(fileFullPath, dpi=200, first_page=1, last_page=max_pages)
+        
+        content = ''
+        for i, image in enumerate(images, 1):
+            logger.info(f"  Processing page {i}/{len(images)} with OCR...")
+            # Extract text from image using Tesseract OCR
+            page_text = pytesseract.image_to_string(image, lang='eng')
+            if page_text:
+                content += page_text + '\n'
+        
+        content = content.strip()
+        logger.info(f"OCR extraction completed: {len(content)} characters extracted from {len(images)} pages")
+        return content if content else None
+        
+    except Exception as err:
+        logger.error(f"OCR extraction failed: {err}")
         return None
 
 def extractPPTXContent(fileFullPath):
@@ -275,8 +332,11 @@ def estimateTokens(fileContents,textLength,classificationsStr,aiModel):
     for ind in range(len(fileContents)):
         fileContent = fileContents[ind]
         # Text extracted from scanned documents up to the number of characters specified by textLength
-        text = fileContent['content'][:textLength]
-        if re.search(r'[a-zA-Z0-9]',text):
+        # Handle None content gracefully
+        text = (fileContent.get('content') or '')[:textLength]
+        
+        # Count meaningful characters
+        if re.search(r'[a-zA-Z0-9]', text):
             # Generate user prompt
             userPrompt = (
                 "role: system, content: You are an AI assistant that helps people classify information contained in documents."
@@ -299,75 +359,464 @@ def unstructuredDataClassification(fileContents,textLength,llmClient,llmodel,cla
     This function will run the contents of each file contained in the subset against the 
     Azure Open AI large language model (GPT-4). The result will be a list of dictionaries
     containing file metadata and also the classification assigned by the LLM model.
+    Enhanced with filename-based fallback and better content detection.
     """
     for ind in range(len(fileContents)):
         fileContent = fileContents[ind]
-        # Text extracted from scanned documents up to the number of characters specified by textLength
-        text = fileContent['content'][:textLength]
-        if re.search(r'[a-zA-Z0-9]',text):
-            # Generate user prompt
+        filename = fileContent.get('name', '')
+        # Text extracted from documents up to the number of characters specified by textLength
+        text = (fileContent.get('content') or '')[:textLength]
+        
+        # Count meaningful content (alphanumeric characters)
+        meaningful_chars = len(re.findall(r'[a-zA-Z0-9]', text))
+        
+        # If we have sufficient meaningful content (at least 20 chars)
+        if meaningful_chars >= 20:
+            # Generate enhanced user prompt
             userPrompt = (
-                            "Classify the following text: "+text
-                            +"Using only any of the following classifications:\n"+classificationsStr
-                            +"The answer should only return one of the listed classifications."
-                        )
-            # Submit prompts to LLM model
+                f"Classify this document excerpt. Filename: {filename}\n\n"
+                f"Content:\n{text}\n\n"
+                f"Choose ONE classification from this list:\n{classificationsStr}\n"
+                "Return ONLY the classification name, nothing else."
+            )
+            # Submit prompts to LLM model with lower temperature for more consistent results
             response = llmClient.complete(
                 messages=[
-                    SystemMessage(content="You are an insurance specialist that helps people classify information contained in documents."),
+                    SystemMessage(content="You are an insurance specialist that helps people classify information contained in documents. Use both the filename and content to determine the most accurate classification."),
                     UserMessage(content=userPrompt),
                 ],
                 max_tokens=4096,
-                temperature=1.0,
+                temperature=0.3,  # Lower temperature for more deterministic classification
                 top_p=1.0,
                 model=llmodel
             )
-            # Original code for Azure Open AI
-            # response = llmClient.chat.completions.create(
-            #     model=azureOpenAIDeploymentName,
-            #     messages=[
-            #         {"role": "system", "content": "You are an AI assistant that helps people classify information contained in documents."},
-            #         {"role": "user", "content": userPrompt},
-            #     ]
-            # )
-            print(f"Processing {fileContent['name']} -> {response.choices[0].message.content}")
-            fileContents[ind].update({'classification':response.choices[0].message.content})
+            classification = response.choices[0].message.content.strip()
+            print(f"Processing {filename} -> {classification} (content: {meaningful_chars} chars)")
+            fileContents[ind].update({'classification':classification})
             # Comment out the line below to determine the exact number of tokens consumed by each document
             print(response.usage)
         else:
-            print(f"Processing {fileContent['name']} -> Empty Content")
-            fileContents[ind].update({'classification':'Empty Content'})
+            # Fallback: Try to infer from filename
+            classification = classify_from_filename(filename, classificationsStr)
+            print(f"Processing {filename} -> {classification} (insufficient content, classified by filename)")
+            fileContents[ind].update({'classification':classification})
     return fileContents
+
+def classify_from_filename(filename, classificationsStr):
+    """
+    Attempt to classify a document based on its filename when content extraction fails.
+    Returns the most likely classification or 'Other' if no match.
+    """
+    filename_lower = filename.lower()
+    classifications = [c.strip() for c in classificationsStr.strip().split('\n') if c.strip()]
+    
+    # Keyword patterns for common classification types
+    # Only returns classifications that exist in the provided classifications list
+    patterns = {
+        'Insurance Claim': ['claim', 'loss', 'damage', 'incident'],
+        'Insurance Policy': ['policy', 'insurance', 'coverage', 'wording'],
+        'Report': ['report', 'inspection', 'assessment', 'analysis', 'toxicology', 'mold', 'asbestos'],
+        'Invoice': ['invoice', 'bill', 'receipt', 'payment'],
+        'Sales Receipt': ['receipt', 'sales', 'purchase'],
+        'PII': ['personal', 'pii', 'confidential', 'ssn'],
+    }
+    
+    # Check filename against patterns, but only for classifications that exist in the list
+    for classification, keywords in patterns.items():
+        if classification in classifications:
+            if any(keyword in filename_lower for keyword in keywords):
+                return classification
+    
+    # Default to 'Other' if it exists, otherwise 'Empty Content'
+    if 'Other' in classifications:
+        return 'Other'
+    elif 'Empty Content' in classifications:
+        return 'Empty Content'
+    else:
+        return classifications[0] if classifications else 'Unknown'
 
 def loadPurviewAssets(purviewClient,allFileContent):
     """
-    Load parent level assets for SharePoint and FileSystem data sources.
+    Load assets for SharePoint and FileSystem data sources creating hierarchical structure:
+    - SharePoint: Account -> RootFolder -> Folder(s) -> Files  
+    - FileSystem: Root -> Folder(s) -> Files
+    Handles recursive folder structures, creating assets for all discovered folders.
     """
+    if not allFileContent:
+        return {"all": [], "file": []}
+
     batchEntities = []
+    tempFileGuids = []  # Track file temp GUIDs to map after upload
     newGuid = -1000
-    # classificationsFound = list(set([file['classification'] for file in allFileContent]))
-    # classificationsFound = list(set(classificationsFound))
-    file = allFileContent[0]
-    print(f"Processing {file['parentObject']} - {file['classification']}")
+    folderEntitiesCreated = {}  # Track created folders to avoid duplicates
 
-    newEntity = AtlasEntity(
-        name=file["parentObject"],
-        typeName=file["typedef"],
-        qualified_name=f"customScanner://{file['parentObject']}",
-        guid=newGuid
-    )
+    sample = allFileContent[0]
+    typedef = sample.get("typedef")
+    
+    print(f"🔍 DEBUG: typedef detected = '{typedef}'")
+    print(f"🔍 DEBUG: sample keys = {list(sample.keys())}")
+    print(f"🔍 DEBUG: Total files to process = {len(allFileContent)}")
 
-    batchEntities.append(newEntity)
+    if typedef in ["SharepointFile", "SharePoint"]:
+        print(f"✅ Creating SharePoint hierarchy with recursive folder support")
+        
+        # Collect unique folders from all files
+        source = sample.get("source", "") or ""
+        source_parts = source.split("/") if source else []
+        derived_account = source_parts[2] if len(source_parts) > 2 else ""
+        account = sample.get("sharepoint_account") or derived_account
+        root_folder = sample.get("sharepoint_root", "")
+        
+        # Create Account entity (once)
+        accountGuid = newGuid
+        accountEntity = AtlasEntity(
+            name=account,
+            typeName="SharepointAccount",
+            qualified_name=f"customScanner://sharepoint/{account}",
+            guid=accountGuid,
+            attributes={
+                "name": account,
+                "qualifiedName": f"customScanner://sharepoint/{account}",
+            }
+        )
+        batchEntities.append(accountEntity)
+        newGuid -= 1
+        print(f"  📁 Account: {account}")
+
+        # Create Root Folder entity (once) with relationship to Account
+        rootGuid = newGuid
+        rootEntity = AtlasEntity(
+            name=root_folder,
+            typeName="SharepointRootFolder",
+            qualified_name=f"customScanner://sharepoint/{account}/{root_folder}",
+            guid=rootGuid,
+            attributes={
+                "name": root_folder,
+                "qualifiedName": f"customScanner://sharepoint/{account}/{root_folder}",
+                "account": {
+                    "guid": accountGuid,
+                    "typeName": "SharepointAccount",
+                    "qualifiedName": f"customScanner://sharepoint/{account}"
+                }
+            },
+            relationshipAttributes={
+                "account": {
+                    "guid": accountGuid,
+                    "typeName": "SharepointAccount",
+                    "qualifiedName": f"customScanner://sharepoint/{account}"
+                }
+            }
+        )
+        batchEntities.append(rootEntity)
+        newGuid -= 1
+        print(f"  📁 Root Folder: {root_folder}")
+
+        # Collect all unique folders from files
+        unique_folders = set()
+        for file in allFileContent:
+            folder_path = (file.get("sharepoint_folder") or "").strip("/")
+            if folder_path:
+                unique_folders.add(folder_path)
+        
+        # Create folder entities for each unique folder with parent relationships
+        # Sort by depth (number of slashes) to ensure parents are created before children
+        for folder_path in sorted(unique_folders, key=lambda p: p.count('/')):
+            if folder_path not in folderEntitiesCreated:
+                folder_name = folder_path.split("/")[-1] if "/" in folder_path else folder_path
+                folderGuid = newGuid
+                
+                # Determine parent (either root or parent folder)
+                parent_relationship = {}
+                if "/" in folder_path:
+                    # Has parent folder
+                    parent_path = "/".join(folder_path.split("/")[:-1])
+                    if parent_path in folderEntitiesCreated:
+                        parent_relationship = {
+                            "parentFolder": {
+                                "guid": folderEntitiesCreated[parent_path],
+                                "typeName": "SharepointFolder",
+                                "qualifiedName": f"customScanner://sharepoint/{account}/{root_folder}/{parent_path}"
+                            }
+                        }
+                    else:
+                        # Parent folder not yet created, link to root
+                        parent_relationship = {
+                            "rootFolder": {
+                                "guid": rootGuid,
+                                "typeName": "SharepointRootFolder",
+                                "qualifiedName": f"customScanner://sharepoint/{account}/{root_folder}"
+                            }
+                        }
+                else:
+                    # Top-level folder, parent is root
+                    parent_relationship = {
+                        "rootFolder": {
+                            "guid": rootGuid,
+                            "typeName": "SharepointRootFolder",
+                            "qualifiedName": f"customScanner://sharepoint/{account}/{root_folder}"
+                        }
+                    }
+                
+                # Add parent to both attributes and relationshipAttributes
+                folder_attributes = {
+                    "name": folder_name,
+                    "qualifiedName": f"customScanner://sharepoint/{account}/{root_folder}/{folder_path}",
+                    "path": folder_path,
+                }
+                # Add parent reference to attributes for hierarchy
+                if parent_relationship:
+                    folder_attributes.update(parent_relationship)
+                
+                folderEntity = AtlasEntity(
+                    name=folder_name,
+                    typeName="SharepointFolder",
+                    qualified_name=f"customScanner://sharepoint/{account}/{root_folder}/{folder_path}",
+                    guid=folderGuid,
+                    attributes=folder_attributes,
+                    relationshipAttributes=parent_relationship
+                )
+                batchEntities.append(folderEntity)
+                folderEntitiesCreated[folder_path] = folderGuid
+                newGuid -= 1
+                print(f"  📁 Folder: {folder_path}")
+        
+        print(f"  📄 Total files: {len(allFileContent)}")
+
+        # Files with parent folder relationships
+        for file in allFileContent:
+            fileGuid = newGuid
+            file_qualified = file.get("source") or f"customScanner://sharepoint/{account}/{root_folder}/{folder_path}/{file['name']}"
+            
+            # Convert datetime objects to ISO format strings
+            created_date = file.get("created_datetime")
+            if hasattr(created_date, 'isoformat'):
+                created_date = created_date.isoformat()
+            modified_date = file.get("last_modified_datetime")
+            if hasattr(modified_date, 'isoformat'):
+                modified_date = modified_date.isoformat()
+            
+            # Determine parent folder for this file
+            folder_path = (file.get("sharepoint_folder") or "").strip("/")
+            file_relationship = {}
+            if folder_path and folder_path in folderEntitiesCreated:
+                # File belongs to a folder
+                file_relationship = {
+                    "folder": {
+                        "guid": folderEntitiesCreated[folder_path],
+                        "typeName": "SharepointFolder",
+                        "qualifiedName": f"customScanner://sharepoint/{account}/{root_folder}/{folder_path}"
+                    }
+                }
+            else:
+                # File is in root folder
+                file_relationship = {
+                    "rootFolder": {
+                        "guid": rootGuid,
+                        "typeName": "SharepointRootFolder",
+                        "qualifiedName": f"customScanner://sharepoint/{account}/{root_folder}"
+                    }
+                }
+            
+            # Add parent to both attributes and relationshipAttributes
+            file_attributes = {
+                "size": file.get("size"),
+                "createdBy": file.get("created_by"),
+                "createdDate": created_date,
+                "lastModifiedDate": modified_date,
+                "lastModifiedBy": file.get("last_modified_by"),
+            }
+            # Add parent reference to attributes for hierarchy
+            if file_relationship:
+                file_attributes.update(file_relationship)
+            
+            fileEntity = AtlasEntity(
+                name=file["name"],
+                typeName="SharepointFile",
+                qualified_name=file_qualified,
+                guid=fileGuid,
+                attributes=file_attributes,
+                relationshipAttributes=file_relationship
+            )
+            batchEntities.append(fileEntity)
+            tempFileGuids.append(fileGuid)
+            newGuid -= 1
+
+    elif typedef == "FileSystemFile":
+        print(f"✅ Creating FileSystem hierarchy with recursive folder support")
+        
+        # Get root from first file, ensure it's not empty
+        root = sample.get("fs_root", "FileSystem") or "FileSystem"
+        
+        # Create Root entity (once)
+        rootGuid = newGuid
+        rootEntity = AtlasEntity(
+            name=root,
+            typeName="FileSystemRoot",
+            qualified_name=f"customScanner://filesystem/{root}",
+            guid=rootGuid,
+            attributes={
+                "name": root,
+                "qualifiedName": f"customScanner://filesystem/{root}",
+            }
+        )
+        batchEntities.append(rootEntity)
+        newGuid -= 1
+        print(f"  📁 Root: {root}")
+
+        # Collect all unique folders from files
+        unique_folders = set()
+        for file in allFileContent:
+            folder_path = (file.get("fs_folder") or "").strip("/")
+            if folder_path and folder_path != ".":
+                unique_folders.add(folder_path)
+        
+        # Create folder entities for each unique folder with parent relationships
+        # Sort by depth (number of slashes) to ensure parents are created before children
+        for folder_path in sorted(unique_folders, key=lambda p: p.count('/')):
+            if folder_path not in folderEntitiesCreated:
+                folder_name = folder_path.split("/")[-1] if "/" in folder_path else folder_path
+                folderGuid = newGuid
+                
+                # Determine parent (either root or parent folder)
+                parent_relationship = {}
+                if "/" in folder_path:
+                    # Has parent folder
+                    parent_path = "/".join(folder_path.split("/")[:-1])
+                    if parent_path in folderEntitiesCreated:
+                        parent_relationship = {
+                            "parentFolder": {
+                                "guid": folderEntitiesCreated[parent_path],
+                                "typeName": "FileSystemFolder",
+                                "qualifiedName": f"customScanner://filesystem/{root}/{parent_path}"
+                            }
+                        }
+                    else:
+                        # Parent folder not yet created, link to root
+                        parent_relationship = {
+                            "root": {
+                                "guid": rootGuid,
+                                "typeName": "FileSystemRoot",
+                                "qualifiedName": f"customScanner://filesystem/{root}"
+                            }
+                        }
+                else:
+                    # Top-level folder, parent is root
+                    parent_relationship = {
+                        "root": {
+                            "guid": rootGuid,
+                            "typeName": "FileSystemRoot",
+                            "qualifiedName": f"customScanner://filesystem/{root}"
+                        }
+                    }
+                
+                # Add parent to both attributes and relationshipAttributes
+                folder_attributes = {
+                    "name": folder_name,
+                    "qualifiedName": f"customScanner://filesystem/{root}/{folder_path}",
+                    "path": folder_path,
+                }
+                # Add parent reference to attributes for hierarchy
+                if parent_relationship:
+                    folder_attributes.update(parent_relationship)
+                
+                folderEntity = AtlasEntity(
+                    name=folder_name,
+                    typeName="FileSystemFolder",
+                    qualified_name=f"customScanner://filesystem/{root}/{folder_path}",
+                    guid=folderGuid,
+                    attributes=folder_attributes,
+                    relationshipAttributes=parent_relationship
+                )
+                batchEntities.append(folderEntity)
+                folderEntitiesCreated[folder_path] = folderGuid
+                newGuid -= 1
+                print(f"  📁 Folder: {folder_path}")
+        
+        print(f"  📄 Total files: {len(allFileContent)}")
+
+        # Files with parent folder relationships
+        for file in allFileContent:
+            fileGuid = newGuid
+            file_qualified = file.get("source") or f"customScanner://filesystem/{root}/{folder_path}/{file['name']}"
+            
+            # Convert datetime objects to ISO format strings
+            created_date = file.get("created_datetime")
+            if hasattr(created_date, 'isoformat'):
+                created_date = created_date.isoformat()
+            modified_date = file.get("last_modified_datetime")
+            if hasattr(modified_date, 'isoformat'):
+                modified_date = modified_date.isoformat()
+            
+            # Determine parent folder for this file
+            folder_path = (file.get("fs_folder") or "").strip("/")
+            file_relationship = {}
+            if folder_path and folder_path != "." and folder_path in folderEntitiesCreated:
+                # File belongs to a folder
+                file_relationship = {
+                    "folder": {
+                        "guid": folderEntitiesCreated[folder_path],
+                        "typeName": "FileSystemFolder",
+                        "qualifiedName": f"customScanner://filesystem/{root}/{folder_path}"
+                    }
+                }
+            else:
+                # File is in root folder
+                file_relationship = {
+                    "root": {
+                        "guid": rootGuid,
+                        "typeName": "FileSystemRoot",
+                        "qualifiedName": f"customScanner://filesystem/{root}"
+                    }
+                }
+            
+            # Add parent to both attributes and relationshipAttributes
+            file_attributes = {
+                "size": file.get("size"),
+                "createdBy": file.get("created_by"),
+                "createdDate": created_date,
+                "lastModifiedDate": modified_date,
+                "lastModifiedBy": file.get("last_modified_by"),
+            }
+            # Add parent reference to attributes for hierarchy
+            if file_relationship:
+                file_attributes.update(file_relationship)
+            
+            fileEntity = AtlasEntity(
+                name=file["name"],
+                typeName="FileSystemFile",
+                qualified_name=file_qualified,
+                guid=fileGuid,
+                attributes=file_attributes,
+                relationshipAttributes=file_relationship
+            )
+            batchEntities.append(fileEntity)
+            tempFileGuids.append(fileGuid)
+            newGuid -= 1
+    else:
+        # Fallback for any other dataset types
+        print(f"⚠️  Using fallback (single parent entity) - typedef: {typedef}")
+        file = sample
+        parentGuid = newGuid
+        newEntity = AtlasEntity(
+            name=file["parentObject"],
+            typeName=file["typedef"],
+            qualified_name=f"customScanner://{file['parentObject']}",
+            guid=parentGuid,
+        )
+        batchEntities.append(newEntity)
+        tempFileGuids.append(parentGuid)
 
     # Convert the individual entities into json before uploading.
     results = purviewClient.upload_entities(
-        batch = batchEntities,
+        batch=batchEntities,
         batch_size=20
     )
 
-    # # Get the Guids for us to work with
-    guids = [v for v in results["guidAssignments"].values()]
-    return guids
+    guidAssignments = results.get("guidAssignments", {})
+    allGuids = [v for v in guidAssignments.values()]
+    fileGuids = [guidAssignments[str(guid)] for guid in tempFileGuids if str(guid) in guidAssignments]
+
+    return {"all": allGuids, "file": fileGuids}
 
 def rollupClassifications(allFileContent):
     """
@@ -379,12 +828,15 @@ def rollupClassifications(allFileContent):
 
 def applyPurviewClassifications(purviewClient,guids,classificationsFound):
     """
-    Apply Classifications to Purview parent resources
+    Apply classifications to all provided GUIDs
     """
     atlasClassifications = [AtlasClassification(classification_name) for classification_name in classificationsFound]
-    results = purviewClient.classify_entity(
-        guid=guids[0], 
-        classifications=atlasClassifications,
-        force_update=True
-    )
+    results = []
+    for guid in guids:
+        resp = purviewClient.classify_entity(
+            guid=guid,
+            classifications=atlasClassifications,
+            force_update=True
+        )
+        results.append(resp)
     return results
