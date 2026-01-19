@@ -275,6 +275,9 @@ class SharePointUtils:
 
         # Construct the URL based on whether a folder path is provided
         if folder_path:
+            # Ensure folder_path starts with / for Graph API
+            if not folder_path.startswith('/'):
+                folder_path = '/' + folder_path
             url = self._format_url(site_id, drive_id, folder_path) + "children"
         else:
             url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives/{drive_id}/root/children"
@@ -283,7 +286,7 @@ class SharePointUtils:
             logger.info("Making request to Microsoft Graph API")
             json_response = self._make_ms_graph_request(url, access_token)
             files = json_response["value"]
-            logger.info("Received response from Microsoft Graph API")
+            logger.info(f"Received {len(files)} items from Microsoft Graph API")
 
             time_limit = (
                 datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
@@ -291,28 +294,35 @@ class SharePointUtils:
                 else None
             )
 
-            filtered_files = [
-                file
-                for file in files
-                    if (
-                        (
-                            time_limit is None
-                            or datetime.fromisoformat(
-                                file["fileSystemInfo"]["createdDateTime"].rstrip("Z")
-                            ).replace(tzinfo=timezone.utc)
-                            >= time_limit
-                            or datetime.fromisoformat(
-                                file["fileSystemInfo"]["lastModifiedDateTime"].rstrip("Z")
-                            ).replace(tzinfo=timezone.utc)
-                            >= time_limit
-                        )
-                        and (
-                            not file_formats
-                            or any(file["name"].endswith(f".{fmt}") for fmt in file_formats)
-                        )
-                    )
-            ]
-
+            filtered_files = []
+            for file in files:
+                # Always include folders (they don't have file extensions)
+                is_folder = "folder" in file
+                
+                # Check time filter
+                passes_time_filter = (
+                    time_limit is None
+                    or datetime.fromisoformat(
+                        file["fileSystemInfo"]["createdDateTime"].rstrip("Z")
+                    ).replace(tzinfo=timezone.utc)
+                    >= time_limit
+                    or datetime.fromisoformat(
+                        file["fileSystemInfo"]["lastModifiedDateTime"].rstrip("Z")
+                    ).replace(tzinfo=timezone.utc)
+                    >= time_limit
+                )
+                
+                # Check file format filter (only for files, not folders)
+                passes_format_filter = (
+                    is_folder  # Always include folders
+                    or not file_formats  # No format filter specified
+                    or any(file["name"].endswith(f".{fmt}") for fmt in file_formats)
+                )
+                
+                if passes_time_filter and passes_format_filter:
+                    filtered_files.append(file)
+            
+            logger.info(f"After filtering: {len(filtered_files)} items (folders and files)")
             return filtered_files
         except Exception as err:
             logger.error(f"Error in get_files_in_site: {err}")
@@ -780,7 +790,7 @@ class SharePointUtils:
         file_formats: Optional[List[str]],
     ) -> List[Dict]:
         """
-        Retrieves the files in a site drive.
+        Retrieves the files in a site drive recursively traversing all subfolders.
 
         :param site_id: The site ID in Microsoft Graph.
         :param drive_id: The drive ID in Microsoft Graph.
@@ -788,16 +798,89 @@ class SharePointUtils:
         :param minutes_ago: Optional integer to filter files created or updated within the specified number of minutes from now.
         :param file_formats: List of desired file formats.
         :param specific_file: Optional specific file to retrieve.
-        :return: A list of file details.
+        :return: A list of file details including files from all subfolders.
         """
-        files = self.get_files_in_site(
+        all_files = []
+        self._get_files_recursive(
             site_id=site_id,
             drive_id=drive_id,
             folder_path=folder_path,
             minutes_ago=minutes_ago,
             file_formats=file_formats,
+            all_files=all_files
         )
-        return files
+        return all_files
+    
+    def _get_files_recursive(
+        self,
+        site_id: str,
+        drive_id: str,
+        folder_path: Optional[str],
+        minutes_ago: Optional[int],
+        file_formats: Optional[List[str]],
+        all_files: List[Dict],
+    ) -> None:
+        """
+        Recursively retrieves files from the current folder and all subfolders.
+        
+        :param site_id: The site ID in Microsoft Graph.
+        :param drive_id: The drive ID in Microsoft Graph.
+        :param folder_path: Path to the current folder.
+        :param minutes_ago: Optional integer to filter files.
+        :param file_formats: List of desired file formats.
+        :param all_files: List to accumulate all files found.
+        """
+        logger.info(f"📂 Recursively scanning: '{folder_path or 'ROOT'}'")
+        
+        items = self.get_files_in_site(
+            site_id=site_id,
+            drive_id=drive_id,
+            folder_path=folder_path,
+            minutes_ago=minutes_ago,
+            file_formats=None,  # Get all items first, filter later
+        )
+        
+        logger.info(f"   Retrieved {len(items)} items from Graph API")
+        
+        folders_found = 0
+        files_found = 0
+        
+        for item in items:
+            item_name = item.get("name", "")
+            # Check if it's a folder
+            if "folder" in item:
+                folders_found += 1
+                # It's a folder, recurse into it
+                if folder_path:
+                    # Ensure proper path formatting
+                    current_path = folder_path.rstrip('/')
+                    subfolder_path = f"{current_path}/{item_name}"
+                else:
+                    subfolder_path = f"/{item_name}"
+                
+                logger.info(f"   ↳ Folder found: '{item_name}' - will recurse into '{subfolder_path}'")
+                self._get_files_recursive(
+                    site_id=site_id,
+                    drive_id=drive_id,
+                    folder_path=subfolder_path,
+                    minutes_ago=minutes_ago,
+                    file_formats=file_formats,
+                    all_files=all_files
+                )
+            elif "file" in item:
+                # It's a file, check if it matches the format filter
+                if not file_formats or any(item_name.endswith(f".{fmt}") for fmt in file_formats):
+                    files_found += 1
+                    # Add folder path metadata to the item
+                    item["_folder_path"] = folder_path or ""
+                    all_files.append(item)
+                    logger.info(f"   ✓ File added: '{item_name}' (matches filter)")
+                else:
+                    logger.info(f"   ✗ File skipped: '{item_name}' (doesn't match filter: {file_formats})")
+            else:
+                logger.warning(f"   ⚠ Unknown item type: '{item_name}' - {list(item.keys())}")
+        
+        logger.info(f"   Summary for '{folder_path or 'ROOT'}': {folders_found} folders, {files_found} files matched")
 
     def _process_files(
         self,
@@ -839,12 +922,14 @@ class SharePointUtils:
                 return []
 
         for file in files:
-            print(f"Processing File {file}")
+            print(f"Processing File {file.get('name')}")
             file_name = file.get("name")
             if file_name and self._is_file_format_valid(file_name, file_formats):
                 metadata = self._extract_file_metadata(file)
+                # Get the actual folder path from the file metadata (set during recursive scan)
+                file_folder_path = file.get("_folder_path", folder_path or "")
                 content = self._retrieve_file_content(
-                    site_id, drive_id, folder_path, file_name
+                    site_id, drive_id, file_folder_path, file_name
                 )
                 users_by_role = self.get_read_access_entities(
                     self.get_file_permissions(site_id, file["id"])
@@ -853,7 +938,7 @@ class SharePointUtils:
                     "content": content,
                     # Israel
                     # **self._format_metadata(metadata, file_name, users_by_role),
-                    **self._format_metadata(metadata, file_name, users_by_role, site_domain, site_name, folder_path),
+                    **self._format_metadata(metadata, file_name, users_by_role, site_domain, site_name, file_folder_path),
                 }
                 file_contents.append(file_content)
 
@@ -948,6 +1033,7 @@ class SharePointUtils:
         :param users_by_role: Dictionary of users grouped by their role.
         :return: Formatted metadata as a dictionary.
         """
+        folder_value = folder_path or ""
         formatted_metadata = {
             "id": metadata["id"],
             "source": metadata["webUrl"],
@@ -958,9 +1044,11 @@ class SharePointUtils:
             "last_modified_datetime": metadata["lastModifiedDateTime"],
             "last_modified_by": metadata["lastModifiedBy"],
             "read_access_entity": users_by_role,
-            # Israel
-            "parentObject": f"{site_domain}/{site_name}{folder_path}",
-            #######
-            "typedef": "SharePoint"
+            # Hierarchy metadata for Purview assets
+            "sharepoint_account": site_domain,
+            "sharepoint_root": site_name,
+            "sharepoint_folder": folder_value,
+            "parentObject": f"{site_domain}/{site_name}{folder_value}",
+            "typedef": "SharepointFile",
         }
         return formatted_metadata
