@@ -1,11 +1,12 @@
 # Custom Purview Scanner Solution for SharePoint Online and Filesystems
 
-I created this repository to demonstrate the implementation of a custom scanner solution in Microsoft Purview for SharePoint Online (SPO) and Filesystem (FS) using the Graph and Atlas REST APIs. The solution is intended to provide an alternative for scanning and classifying data in SPO and FS data sources, currently not supported natively by Microsoft Purview. I leveraged the [sharepoint-indexing-azure-cognitive-search](https://github.com/liamca/sharepoint-indexing-azure-cognitive-search/blob/main/README.md) solution created by `Liam Cavanagh` as the basis for accessing SharePoint online sites.
+This repository is based on an import from [israeloros/PurviewCustomScanner](https://github.com/israeloros/PurviewCustomScanner) and demonstrates the implementation of a custom scanner solution in Microsoft Purview for SharePoint Online (SPO) and Filesystem (FS) using the Graph and Atlas REST APIs. The solution is intended to provide an alternative for scanning and classifying data in SPO and FS data sources, currently not supported natively by Microsoft Purview. The original solution leveraged the [sharepoint-indexing-azure-cognitive-search](https://github.com/liamca/sharepoint-indexing-azure-cognitive-search/blob/main/README.md) solution created by `Liam Cavanagh` as the basis for accessing SharePoint online sites.
 
 ## Key Features
 
 - **Hierarchical Asset Relationships**: Automatically creates parent-child relationships between accounts, folders, and files in Purview
 - **AI-Powered Classification**: Uses Azure OpenAI LLMs to intelligently classify document contents
+- **OCR Support**: Extracts text from scanned PDFs and image-based documents using Tesseract OCR
 - **Multi-Source Support**: Scans both SharePoint Online sites and local filesystems
 - **Automated Asset Organization**: Creates custom entity types, relationships, and collections in Purview
 - **Flexible Classification**: Supports custom classification schemas tailored to your organization
@@ -32,6 +33,7 @@ The main notebook and libraries are responsible for abstracting the different AP
 - <b>SharePoint Online Site</b>: For the Microsoft Graph REST API to be able to access your content, you will need to provide access to this REST API which will included granting [admin consent](https://learn.microsoft.com/en-us/azure/active-directory/develop/console-app-quickstart?pivots=devlang-python).
 - <b>Azure AI Foundry LLM Deployment</b>: The deployed LLM will be used to classify the contents of the files discovered by the scanner process. You can learn more about how to get [started here](https://learn.microsoft.com/en-us/azure/ai-foundry/concepts/deployments-overview).
 - <b>Entra ID Service Principal</b>: This Entra ID identity will be used to authenticate the solution with Microsoft SharePoint, Azure AI, and Microsoft Purview services.
+- <b>Tesseract OCR</b> (Optional): For scanning image-based documents and scanned PDFs. See [OCR_SETUP.md](OCR_SETUP.md) for installation instructions.
 
 # Configuration Steps
 
