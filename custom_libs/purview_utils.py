@@ -18,7 +18,6 @@ from custom_libs.custom_logging import get_logger
 try:
     from pdf2image import convert_from_path
     import pytesseract
-    from PIL import Image
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
@@ -63,7 +62,10 @@ def filesystemFileSampleList(input_file_list, file_sample_size,file_system_path,
     def build_file_info(path_str):
         fileFullPath = Path(path_str)
         fileName = fileFullPath.name
-        root_name = Path(file_system_path).name
+        if file_system_path:
+            root_name = Path(file_system_path).name or "FileSystem"
+        else:
+            root_name = "FileSystem"
         try:
             rel_folder = fileFullPath.parent.relative_to(file_system_path).as_posix()
         except ValueError:
@@ -181,18 +183,18 @@ def listFilesystemFiles(mypath, extensions):
 def extractPDFContent(fileFullPath):
     # Function to convert PDF files to Text with enhanced extraction
     try:
-        pdffileobj = open(fileFullPath,'rb')
-        pdfreader = PyPDF2.PdfReader(pdffileobj)
-        num_pages = len(pdfreader.pages)
-        content = ''
-        for page in range(num_pages):
-            pageobj = pdfreader.pages[page]
-            page_text = pageobj.extract_text()
-            if page_text:
-                content += page_text + '\n'
-        
-        # Clean up the extracted text
-        content = content.strip()
+        with open(fileFullPath, 'rb') as pdffileobj:
+            pdfreader = PyPDF2.PdfReader(pdffileobj)
+            num_pages = len(pdfreader.pages)
+            content = ''
+            for page in range(num_pages):
+                pageobj = pdfreader.pages[page]
+                page_text = pageobj.extract_text()
+                if page_text:
+                    content += page_text + '\n'
+            
+            # Clean up the extracted text
+            content = content.strip()
         
         # If minimal content extracted, try OCR
         if len(content) < 50:
@@ -408,7 +410,8 @@ def classify_from_filename(filename, classificationsStr):
     filename_lower = filename.lower()
     classifications = [c.strip() for c in classificationsStr.strip().split('\n') if c.strip()]
     
-    # Keyword patterns for each classification type
+    # Keyword patterns for common classification types
+    # Only returns classifications that exist in the provided classifications list
     patterns = {
         'Insurance Claim': ['claim', 'loss', 'damage', 'incident'],
         'Insurance Policy': ['policy', 'insurance', 'coverage', 'wording'],
@@ -418,7 +421,7 @@ def classify_from_filename(filename, classificationsStr):
         'PII': ['personal', 'pii', 'confidential', 'ssn'],
     }
     
-    # Check filename against patterns
+    # Check filename against patterns, but only for classifications that exist in the list
     for classification, keywords in patterns.items():
         if classification in classifications:
             if any(keyword in filename_lower for keyword in keywords):
@@ -458,7 +461,10 @@ def loadPurviewAssets(purviewClient,allFileContent):
         print(f"✅ Creating SharePoint hierarchy with recursive folder support")
         
         # Collect unique folders from all files
-        account = sample.get("sharepoint_account") or (sample.get("source", "").split("/")[2] if sample.get("source") else "")
+        source = sample.get("source", "") or ""
+        source_parts = source.split("/") if source else []
+        derived_account = source_parts[2] if len(source_parts) > 2 else ""
+        account = sample.get("sharepoint_account") or derived_account
         root_folder = sample.get("sharepoint_root", "")
         
         # Create Account entity (once)
@@ -513,7 +519,8 @@ def loadPurviewAssets(purviewClient,allFileContent):
                 unique_folders.add(folder_path)
         
         # Create folder entities for each unique folder with parent relationships
-        for folder_path in sorted(unique_folders):
+        # Sort by depth (number of slashes) to ensure parents are created before children
+        for folder_path in sorted(unique_folders, key=lambda p: p.count('/')):
             if folder_path not in folderEntitiesCreated:
                 folder_name = folder_path.split("/")[-1] if "/" in folder_path else folder_path
                 folderGuid = newGuid
@@ -637,8 +644,8 @@ def loadPurviewAssets(purviewClient,allFileContent):
     elif typedef == "FileSystemFile":
         print(f"✅ Creating FileSystem hierarchy with recursive folder support")
         
-        # Get root from first file
-        root = sample.get("fs_root", "FileSystem")
+        # Get root from first file, ensure it's not empty
+        root = sample.get("fs_root", "FileSystem") or "FileSystem"
         
         # Create Root entity (once)
         rootGuid = newGuid
@@ -664,7 +671,8 @@ def loadPurviewAssets(purviewClient,allFileContent):
                 unique_folders.add(folder_path)
         
         # Create folder entities for each unique folder with parent relationships
-        for folder_path in sorted(unique_folders):
+        # Sort by depth (number of slashes) to ensure parents are created before children
+        for folder_path in sorted(unique_folders, key=lambda p: p.count('/')):
             if folder_path not in folderEntitiesCreated:
                 folder_name = folder_path.split("/")[-1] if "/" in folder_path else folder_path
                 folderGuid = newGuid
